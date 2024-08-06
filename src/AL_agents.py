@@ -2,7 +2,8 @@ import numpy as np
 from sklearn.gaussian_process import GaussianProcessRegressor, kernels
 from sklearn.neighbors import KNeighborsRegressor
 from src.dataset import BaseDataset
-from src.NN_models import SimpleMLP, validate, train_epoch
+from torchdrug import data as torchdrug_data
+from src.NN_models import SimpleMLP, validate, train_epoch, GNN_validate, GNN_train_epoch
 from copy import deepcopy
 import torch
 
@@ -184,3 +185,57 @@ class NNLearner(BaseLearner):
                 print("Could not find enough samples below the treshold")
                 return global_problem.sample(n_samples)
         return np.array(accepted_samples)[:n_samples], np.array(accepted_indexes)[:n_samples]
+    
+    
+class GNNLearner(NNLearner):
+    def __init__(self, model_init: BaseDataset, loss, device: str = 'cpu', lr: float = 0.001, n_epochs: int = 1000, batch_size: int = 32):
+        #super().__init__(GNNLearner)
+        self.model_init = model_init
+        self.model = self.model_init()
+        self.loss = loss
+        self.device = device
+        self.lr = lr
+        self.n_epochs = n_epochs
+        self.batch_size = batch_size
+        
+    def fit(self, X: np.ndarray, y: np.ndarray) -> None:
+        # Prepare data
+        dataset = X
+        for i in range(len(dataset)):
+            dataset[i]["labeled"] = True
+            dataset[i]["target"] = y[i]
+        train_size = int(0.8*len(dataset))
+        val_size = len(dataset) - train_size
+        train_dataset, val_dataset = torch.utils.data.random_split(dataset, [train_size, val_size])
+        train_loader = torchdrug_data.DataLoader(train_dataset, batch_size=self.batch_size, shuffle=True)
+        validation_loader = torchdrug_data.DataLoader(val_dataset, batch_size=self.batch_size, shuffle=False)
+        
+        # Reset model
+        self.model = self.model_init()
+        self.model.preprocess(dataset, dataset, dataset)
+        self.model.forward = self.model.predict
+        self.optimizer = torch.optim.Adam(self.model.parameters(), lr=self.lr)
+        
+        # Train the model
+        validation_losses = []
+        validation_accuracies = []
+        best_model = None
+        best_accuracy = 0
+        
+        for epoch in range(self.n_epochs):
+            # Validate model
+            val_loss, val_accuracy = GNN_validate(self.model, self.loss, validation_loader, self.device)
+            print(f"validation loss: {val_loss}")
+            validation_losses.append(val_loss)
+            validation_accuracies.append(val_accuracy)
+            # Update best model if necessary
+            if best_model is None or val_accuracy > best_accuracy:
+                best_model = deepcopy(self.model)
+                best_accuracy = val_accuracy
+            
+            # Train
+            for j in range(10):
+                GNN_train_epoch(self.model, self.optimizer, self.loss, train_loader, self.device)
+        print(f"Best Validation Accuracy: {best_accuracy} at epoch {validation_accuracies.index(best_accuracy)}")
+        # Set the best model
+        self.model = best_model

@@ -3,6 +3,7 @@ import scipy.optimize as opt
 import torch
 from torchdrug import datasets
 from typing import Optional
+from torchdrug.data.dataloader import graph_collate
 #from src.dataset_downloader import get_MNIST
 
 class BaseDataset:
@@ -74,9 +75,16 @@ class MNIST_manifold(BaseDataset):
 '''  
     
 class ZINC250k_manifold(BaseDataset):
-    def __init__(self, data_path: str = "data/ZINC250k", logP_tresh = (1, 3), lazy: bool = False):
-        self.logP_tresh = logP_tresh
- 
+    def __init__(self, data_path: str = "data/ZINC250k", logP_interval = (1, 3), lazy: bool = False, reduced_size: int = -1):
+        """ Manifold Dataset for storing the Zinc250k dataset.
+        Args:
+            data_path: Where to store the dataset after downloading
+            logP_interval: The interval of logP values within the target manifold
+            lazy: Whenver to process the graph structure of the molecules online or all molecules in the beginning
+            reduced_size: How much to reduce the dataset size. -1 to remove. Only used for debugging.
+        """
+        self.logP_tresh = logP_interval
+        self.processed = False
         data = datasets.ZINC250k(data_path, lazy=lazy)
         self.node_feature_dim = data.node_feature_dim
         self.tasks = data.tasks
@@ -85,14 +93,19 @@ class ZINC250k_manifold(BaseDataset):
         n_train = int(n_samples*0.8)
         n_test = n_samples - n_train
         self.train_data, self.test_data = torch.utils.data.random_split(data, [n_train, n_test])
-        self.X_train = [self.train_data[i]["graph"] for i in range(len(self.train_data))]
+        if not lazy:
+            self.process_data()
+            
+    def process_data(self):
         y_train_logP = torch.tensor([self.train_data[i]["logP"] for i in range(len(self.train_data))])
+        self.X_train = [self.train_data[i]["graph"] for i in range(len(self.train_data))]
         self.y_manifold_train = self.convert_data_under_manifold(y_train_logP)
         self.X_test = [self.test_data[i]["graph"] for i in range(len(self.test_data))]
         y_test_logP = torch.tensor([self.test_data[i]["logP"] for i in range(len(self.test_data))])
         self.y_manifold_test = self.convert_data_under_manifold(y_test_logP)
         self.y_test = torch.tensor([self.test_data[i]["qed"] for i in range(len(self.test_data))])
         self.mask_test_data()
+        self.processed = True
         
     def mask_test_data(self) -> None:
         """ Mask out test data not part of the manifold """
@@ -110,17 +123,25 @@ class ZINC250k_manifold(BaseDataset):
     
     def sample(self, n_samples: int) -> tuple[np.ndarray, np.ndarray]:
         indices = torch.randperm(len(self.train_data))[:n_samples]
-        return [self.X_train[index] for index in indices], indices
+        if self.processed:
+            return [graph_collate([self.X_train[i]]) for i in indices], indices
+        else:
+            return [graph_collate([self.train_data[i]]) for i in indices], indices
     
     def label_global(self, X: np.ndarray, index: Optional[np.ndarray] = None) -> np.ndarray:
         if index is None:
             raise ValueError("Index must be provided")
         return self.y_train[index]
     
-    def label_manifold(self, X: np.ndarray, index: Optional[np.ndarray] = None) -> np.ndarray:
-        if index is None:
+    def label_manifold(self, X: np.ndarray, indices: Optional[np.ndarray] = None) -> np.ndarray:
+        if indices is None:
             raise ValueError("Index must be provided")
-        return self.y_manifold_train[index]
+        if self.processed:
+            return self.y_manifold_train[indices]
+        else:
+            data = torch.Tensor([self.train_data[i]["logP"] for i in indices])
+            return self.convert_data_under_manifold(data)
+            
 
 class ToySample1:
     def __init__(self, n_features: int = 2):

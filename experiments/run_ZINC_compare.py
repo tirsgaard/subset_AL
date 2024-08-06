@@ -4,7 +4,7 @@ from sklearn.gaussian_process import kernels as kernels
 from scipy.stats import norm
 import scipy.optimize as opt
 from src.dataset import BaseDataset, ZINC250k_manifold
-from src.AL_agents import GPLearner, KNNLearner, BaseLearner, NNLearner
+from src.AL_agents import GPLearner, KNNLearner, BaseLearner, NNLearner, GNNLearner
 from src.learning_methods import global_AL_subset_model
 import torch
 from torchdrug import models, tasks, data, datasets
@@ -13,27 +13,21 @@ from pathlib import Path
 
 np.random.seed(0)
 dataset_save_path = Path("data/ZINC250k/ZINC250k.pkl").resolve()
+problem = ZINC250k_manifold(lazy=True)
 
-test_dataset = datasets.ZINC250k("data/ZINC250k", lazy=False)
-test_loader = data.DataLoader(test_dataset, batch_size=32)
-
-
-other_model = tasks.PropertyPrediction(models.GIN(test_dataset.node_feature_dim, hidden_dims=[256, 256, 256, 256]), task=test_dataset.tasks,
+# Test code
+model = tasks.PropertyPrediction(models.GIN(problem.node_feature_dim, hidden_dims=[256, 256, 256, 256]), task=problem.tasks,
                                 criterion="bce", metric=("auprc", "auroc"))
-test = other_model.forward(test_dataset[0])
-batch = next(iter(test_loader))
-model = models.GIN(test_dataset.node_feature_dim, hidden_dims=[256, 256, 256, 256])
-problem = ZINC250k_manifold(lazy=False)
 
-n_neighbours = 3
+loss_fn = torch.nn.MSELoss()
 classification_loss = torch.nn.CrossEntropyLoss()
-init_model_manifold = lambda: tasks.PropertyPrediction(models.GIN(problem.node_feature_dim, hidden_dims=[256, 256, 256, 256]), task=problem.tasks,
-                                criterion="bce", metric=("auprc", "auroc"))
-init_model_global = lambda: tasks.PropertyPrediction(models.GIN(problem.node_feature_dim, hidden_dims=[256, 256, 256, 256]), task=problem.tasks,
-                                criterion="bce", metric=("auprc", "auroc"))
+model_initialiser = lambda: tasks.PropertyPrediction(models.GIN(problem.node_feature_dim, hidden_dims=[256, 256, 256, 256]), task=problem.tasks,
+                                criterion="bce", metric=("auroc"), num_class=1)
+init_model_manifold = lambda: GNNLearner(model_initialiser, loss=loss_fn)
+init_model_global = lambda: GNNLearner(model_initialiser, loss=loss_fn)
 
 n_repeats = 10
-data_budget = 1000
+data_budget = 100
 
 def calculate_accuracy(y_hat, y):
     return np.mean(y_hat.argmax(-1) == y.argmax(-1))
@@ -47,9 +41,6 @@ def manifold_experiment(init_model_subset: callable,
     X_manifold, X_index = problem.sample(data_budget)
     y_manifold = problem.label_manifold(X_manifold, X_index)
 
-    # Define test set
-    X_test, y_test = problem.X_test, problem.y_test
-
     # Active learning
     manifold_budget = int(manifold_budget*data_budget)
     global_budget = data_budget - manifold_budget
@@ -58,6 +49,9 @@ def manifold_experiment(init_model_subset: callable,
     model_subset.fit(X_manifold[:manifold_budget], y_manifold[:manifold_budget])
     X_manifold_pred, X_manifold_index = model_subset.sample(global_budget, problem)
     y_manifold_pred = problem.label_global(X_manifold_pred, X_manifold_index)
+    
+    # Define test set
+    X_test, y_test = problem.X_test, problem.y_test
     
     # Sample points from the manifold
     model_global = init_model_global()
