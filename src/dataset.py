@@ -1,9 +1,9 @@
 import numpy as np
 import scipy.optimize as opt
 import torch
-from torchdrug import datasets
 from typing import Optional
-from torchdrug.data.dataloader import graph_collate
+from torch_geometric.datasets import ZINC
+
 #from src.dataset_downloader import get_MNIST
 
 class BaseDataset:
@@ -73,8 +73,102 @@ class MNIST_manifold(BaseDataset):
             raise ValueError("Index must be provided")
         return self.y_manifold_train[index]
 '''  
-    
+
 class ZINC250k_manifold(BaseDataset):
+    def __init__(self, data_path: str = "data/ZINC250k", logP_interval = (1, 3), 
+                 full_dataset: bool = False, split: str = "train", pre_transform = None, transform = None):
+        """ Manifold Dataset for storing the Zinc250k dataset.
+        Args:
+            data_path: Where to store the dataset after downloading
+            logP_interval: The interval of logP values within the target manifold
+            lazy: Whenver to process the graph structure of the molecules online or all molecules in the beginning
+            reduced_size: How much to reduce the dataset size. -1 to remove. Only used for debugging.
+        """
+        self.logP_tresh = logP_interval
+        self.processed = False
+        self.dataset = ZINC(data_path,
+                         subset=full_dataset,
+                         split=split,
+                         pre_transform=pre_transform,
+                         transform=transform)
+        self.node_feature_dim = data.node_feature_dim
+        self.tasks = data.tasks
+        
+        # TODO remove temporary workaround
+        for datapoint in self.dataset:
+            datapoint.logP = 6*torch.rand(1)
+        # Split data
+        n_samples = len(self.processed)
+        self.process_data()
+            
+    def process_data(self):
+        for datapoint in self.dataset:
+            datapoint.in_subset = self.in_subset(datapoint)
+        
+    def mask_test_data(self) -> None:
+        """ Mask out test data not part of the manifold """
+        self.test_data = torch.utils.data.Subset(self.test_data, np.arange(len(self.y_manifold_test))[self.y_manifold_test])
+        self.X_test = [self.test_data[i]["graph"] for i in range(len(self.test_data))]
+        y_test_logP = torch.tensor([self.test_data[i]["logP"] for i in range(len(self.test_data))])
+        self.y_manifold_test = self.convert_data_under_manifold(y_test_logP)
+        self.y_test = torch.tensor([self.test_data[i]["qed"] for i in range(len(self.test_data))])
+    
+    def in_subset(self, datapoint):
+        return (self.logP_tresh[0] <= datapoint.logP) & (datapoint.logP <= self.logP_tresh[1])
+    
+    def sample(self, n_samples: int) -> tuple[np.ndarray, np.ndarray]:
+        indices = torch.randperm(len(self.train_data))[:n_samples]
+        return [[self.dataset[i]] for i in indices], indices
+    
+    def label_global(self, X: np.ndarray, index: Optional[np.ndarray] = None) -> np.ndarray:
+        if index is None:
+            raise ValueError("Index must be provided")
+        return self.dataset[index].y
+    
+    def label_manifold(self, X: np.ndarray, indices: Optional[np.ndarray] = None) -> np.ndarray:
+        if indices is None:
+            raise ValueError("Index must be provided")
+        return torch.Tensor([self.dataset[i].in_subset for i in indices])            
+
+class ToySample1:
+    def __init__(self, n_features: int = 2):
+        self.n_features = 2
+        self.min_val = -10
+        self.max_val = 10
+    
+    def label_global(self, X: np.ndarray, index: Optional[np.ndarray] = None) -> np.ndarray:
+        return np.sin(np.abs(X[..., 0])) - np.abs(X[..., 1])
+    
+    def sample(self, n_samples: int, **kwargs) -> tuple[np.ndarray, np.ndarray]:
+        X = np.random.rand(n_samples, 2)*(self.max_val - self.min_val) + self.min_val
+        return X, -1*np.ones(n_samples)
+    
+    def manifold(self, t: np.ndarray) -> np.ndarray:
+        t = t.squeeze()
+        return np.stack([t + np.sin(t) , np.sin(t) + np.abs(t)**0.5], axis=-1)
+    
+    def label_manifold(self, X: np.ndarray, index: Optional[np.ndarray] = None) -> np.ndarray:
+        return np.array([self.manifold_dist(x) for x in X])
+    
+    def sample_manifold(self, n_samples: int) -> tuple[np.ndarray, np.ndarray]:
+        t = np.random.rand(n_samples)*(self.max_range - self.min_range) + self.min_range
+        return self.manifold(t), np.zeros(n_samples)
+    
+    def manifold_dist(self, x: np.ndarray, n_init: int = 10) -> float:
+        def distance(t): 
+            return np.sum((x - self.manifold(t))**2)**0.5
+        # Find the minimum of the distance function
+        min_dist = np.inf
+        x0s = np.linspace(self.min_val, self.max_val, n_init)
+        for i in range(n_init):
+            res = opt.minimize(distance, x0s[i])
+            if res.fun < min_dist:
+                min_dist = res.fun
+        return min_dist
+    
+class ZINC250k_manifold_legacy(BaseDataset):
+    from torchdrug import datasets
+    from torchdrug.data.dataloader import graph_collate
     def __init__(self, data_path: str = "data/ZINC250k", logP_interval = (1, 3), lazy: bool = False, reduced_size: int = -1):
         """ Manifold Dataset for storing the Zinc250k dataset.
         Args:
