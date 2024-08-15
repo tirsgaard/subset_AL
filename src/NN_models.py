@@ -2,7 +2,6 @@ import torch
 #import torchvision
 import torch.nn.functional as F
 from time import time
-import torchdrug.models
 import torch.nn as nn
 
 class linear_batch_norm_relu(nn.Module):

@@ -2,9 +2,19 @@ import numpy as np
 from sklearn.gaussian_process import GaussianProcessRegressor, kernels
 from sklearn.neighbors import KNeighborsRegressor
 from src.dataset import BaseDataset
-from torchdrug import data as torchdrug_data
 from src.NN_models import SimpleMLP, validate, train_epoch, GNN_validate, GNN_train_epoch
 from copy import deepcopy
+from lightning.pytorch import Trainer
+from lightning.pytorch.callbacks.progress import TQDMProgressBar
+from lightning.pytorch.callbacks import ModelCheckpoint, LearningRateMonitor, Timer, Callback
+
+import sys
+from pathlib import Path
+sys.path.insert(1, Path("../N2GNN").resolve().as_posix())
+from interfaces.pl_data_interface import PlPyGDataTestonValModule
+import train_utils
+from time import time
+
 import torch
 
 class BaseLearner:
@@ -171,10 +181,10 @@ class NNLearner(BaseLearner):
         n_tries = 0
         while n_accepted < n_samples:
             x, indexes = global_problem.sample(n_reject_samples)
-            x = torch.tensor(x).float().to(self.device)
+            #x = torch.tensor(x).float().to(self.device)
             y_hat = self.model.forward(x)
             rejection_value = torch.rand(n_reject_samples)
-            accepted = y_hat[:, 1] > rejection_value
+            accepted = y_hat > rejection_value
             if not torch.any(accepted):
                 n_tries += 1
             else:
@@ -184,58 +194,89 @@ class NNLearner(BaseLearner):
             if n_tries > 10**4:
                 print("Could not find enough samples below the treshold")
                 return global_problem.sample(n_samples)
-        return np.array(accepted_samples)[:n_samples], np.array(accepted_indexes)[:n_samples]
+        return list(accepted_samples)[:n_samples], np.array(accepted_indexes)[:n_samples]
     
+class StoreBestModel(Callback):
+    """ Callback for storing the best model in RAM to avoid saving it to disk """
+    def __init__(self, monitor, mode):
+        self.best_model = None
+        self.best_metric = None
+        self.monitor = monitor
+        self.mode = mode
+    
+    def on_validation_end(self, trainer, pl_module):
+        if self.best_model is None or (self.mode == "min" and trainer.callback_metrics[self.monitor] < self.best_metric) or (self.mode == "max" and trainer.callback_metrics[self.monitor] > self.best_metric):
+            self.best_model = pl_module.state_dict().copy()
+            self.best_metric = trainer.callback_metrics[self.monitor]
+        
     
 class GNNLearner(NNLearner):
-    def __init__(self, model_init: BaseDataset, loss, device: str = 'cpu', lr: float = 0.001, n_epochs: int = 1000, batch_size: int = 32):
+    def __init__(self, model_init: BaseDataset, loss, args, device: str = 'cpu', lr: float = 0.001, n_epochs: int = 1000, batch_size: int = 32, num_workers: int = 0):
         #super().__init__(GNNLearner)
         self.model_init = model_init
         self.model = self.model_init()
         self.loss = loss
+        self.args = args
         self.device = device
         self.lr = lr
         self.n_epochs = n_epochs
         self.batch_size = batch_size
+        self.num_workers = num_workers
         
-    def fit(self, X: np.ndarray, y: np.ndarray) -> None:
-        # Prepare data
-        dataset = X
-        for i in range(len(dataset)):
-            dataset[i]["labeled"] = True
-            dataset[i]["target"] = y[i]
+        
+    def prepare_data(self, dataset) -> any:
+        path, pre_transform, follow_batch = train_utils.data_setup(self.args)
         train_size = int(0.8*len(dataset))
         val_size = len(dataset) - train_size
         train_dataset, val_dataset = torch.utils.data.random_split(dataset, [train_size, val_size])
-        train_loader = torchdrug_data.DataLoader(train_dataset, batch_size=self.batch_size, shuffle=True)
-        validation_loader = torchdrug_data.DataLoader(val_dataset, batch_size=self.batch_size, shuffle=False)
+    
+        datamodule = PlPyGDataTestonValModule(train_dataset=train_dataset,
+                                              val_dataset=val_dataset,
+                                              test_dataset=val_dataset,
+                                              batch_size=self.batch_size,
+                                              num_workers=self.num_workers,
+                                              follow_batch=follow_batch,
+                                              drop_last=False)
+        return datamodule
+    
+    def test(self, test_dataset) -> float:
+        datamodule = self.prepare_data(test_dataset)
         
-        # Reset model
-        self.model = self.model_init()
-        self.model.preprocess(dataset, dataset, dataset)
-        self.model.forward = self.model.predict
-        self.optimizer = torch.optim.Adam(self.model.parameters(), lr=self.lr)
+        timer = Timer(duration=dict(weeks=4))
+        best_model_checkpoint = StoreBestModel(monitor="val/metric", mode=self.args.mode)
+        trainer = Trainer(accelerator="auto",
+                          devices="auto",
+                          max_epochs=self.n_epochs,
+                          callbacks=[TQDMProgressBar(refresh_rate=20),
+                                     best_model_checkpoint,
+                                     LearningRateMonitor(logging_interval="epoch"),
+                                     timer])
+        return trainer.test(self.model, datamodule=datamodule)
         
-        # Train the model
-        validation_losses = []
-        validation_accuracies = []
-        best_model = None
-        best_accuracy = 0
+    def fit(self, dataset) -> None:        
+        datamodule = self.prepare_data(dataset)
+        timer = Timer(duration=dict(weeks=4))
+        best_model_checkpoint = StoreBestModel(monitor="val/metric", mode=self.args.mode)
+        trainer = Trainer(accelerator="auto",
+                          devices="auto",
+                          max_epochs=self.n_epochs,
+                          callbacks=[TQDMProgressBar(refresh_rate=20),
+                                     best_model_checkpoint,
+                                     LearningRateMonitor(logging_interval="epoch"),
+                                     timer])
+
+        trainer.fit(self.model, datamodule=datamodule)
         
-        for epoch in range(self.n_epochs):
-            # Validate model
-            val_loss, val_accuracy = GNN_validate(self.model, self.loss, validation_loader, self.device)
-            print(f"validation loss: {val_loss}")
-            validation_losses.append(val_loss)
-            validation_accuracies.append(val_accuracy)
-            # Update best model if necessary
-            if best_model is None or val_accuracy > best_accuracy:
-                best_model = deepcopy(self.model)
-                best_accuracy = val_accuracy
-            
-            # Train
-            for j in range(10):
-                GNN_train_epoch(self.model, self.optimizer, self.loss, train_loader, self.device)
-        print(f"Best Validation Accuracy: {best_accuracy} at epoch {validation_accuracies.index(best_accuracy)}")
         # Set the best model
-        self.model = best_model
+        self.model.load_state_dict(best_model_checkpoint.best_model)
+        
+    def rank_samples(self, unlabelled_data: np.ndarray) -> np.ndarray:
+        """ Rank samples by distance to the training data """
+        y_hat = torch.stack([self.model.forward(x) for x in unlabelled_data])
+        unc = torch.abs(torch.nn.functional.softmax(y_hat, 0) - 0.5)
+        return torch.argsort(unc, descending=True)
+    
+    def select_samples(self, unlabelled_data: np.ndarray, n_samples: int) -> tuple[np.ndarray, np.ndarray]:
+        """ Select n_samples from the unlabelled data """
+        ranking = self.rank_samples(unlabelled_data)
+        return [unlabelled_data[index] for index in ranking[:n_samples]], ranking[:n_samples]
