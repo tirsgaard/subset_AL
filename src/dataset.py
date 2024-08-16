@@ -110,7 +110,7 @@ class SubsetGraph(torch_geometric.data.Data):
         
     
 class ZINC250k_manifold(BaseDataset):
-    def __init__(self, data_path: str = "data/ZINC250k", logP_interval = (1, 3), 
+    def __init__(self, data_path: str = "data/ZINC250k", atom_max = 23, 
                  full_dataset: bool = False, pre_transform = None, transform = None):
         """ Manifold Dataset for storing the Zinc250k dataset.
         Args:
@@ -120,7 +120,7 @@ class ZINC250k_manifold(BaseDataset):
             pre_transform: Preprocessing transformation
             transform: Transformation to apply to the data
         """
-        self.logP_tresh = logP_interval
+        self.atom_max = atom_max
         dataset_init = partial(ZINC, data_path, subset=not full_dataset, pre_transform=pre_transform, transform=transform)
         self.train_data = dataset_init(split="train")
         self.val_data = dataset_init(split="val")
@@ -129,6 +129,7 @@ class ZINC250k_manifold(BaseDataset):
         
         self.process_data()
         self.mask_test_data()
+        self.mask_val_data()
         
         
     def add_attribute(self, attribute: str, attribute_data: torch.Tensor, data: torch_geometric.data.Data):
@@ -139,15 +140,10 @@ class ZINC250k_manifold(BaseDataset):
         data.slices[attribute] = torch.arange(len(attribute_data)+1)        
         
     def process_data(self):
-        # TODO remove temporary workaround for logP value
-        self.add_attribute("logP", 6*torch.rand(len(self.train_data)), self.train_data)
-        self.add_attribute("logP", 6*torch.rand(len(self.val_data)), self.val_data)
-        self.add_attribute("logP", 6*torch.rand(len(self.test_data)), self.test_data)
-        
         # Add the in_subset attribute to the data
-        in_subset_train = self.tensor_in_subset(self.train_data._data.logP)
-        in_subset_val = self.tensor_in_subset(self.val_data._data.logP)
-        in_subset_test = self.tensor_in_subset(self.test_data._data.logP)
+        in_subset_train = self.tensor_in_subset(self.train_data._data.original_num_nodes)
+        in_subset_val = self.tensor_in_subset(self.val_data._data.original_num_nodes)
+        in_subset_test = self.tensor_in_subset(self.test_data._data.original_num_nodes)
         
         self.add_attribute("in_subset", in_subset_train, self.train_data)
         self.add_attribute("in_subset", in_subset_val, self.val_data)
@@ -158,11 +154,13 @@ class ZINC250k_manifold(BaseDataset):
         in_manifold_indices = torch.tensor([i for i, datapoint in enumerate(self.test_data) if datapoint.in_subset])
         self.test_data = self.test_data[in_manifold_indices]
         
+    def mask_val_data(self) -> None:
+        """ Mask out val data not part of the manifold """
+        in_manifold_indices = torch.tensor([i for i, datapoint in enumerate(self.val_data) if datapoint.in_subset])
+        self.val_data = self.val_data[in_manifold_indices]
+        
     def tensor_in_subset(self, tensor: torch.Tensor) -> torch.Tensor:
-        return ((self.logP_tresh[0] <= tensor) & (tensor <= self.logP_tresh[1])).float()
-    
-    def in_subset(self, datapoint):
-        return ((self.logP_tresh[0] <= datapoint.logP) & (datapoint.logP <= self.logP_tresh[1])).float()
+        return (tensor <= self.atom_max).float()
     
     def sample(self, n_samples: int) -> tuple[np.ndarray, np.ndarray]:
         indices = torch.randperm(len(self.train_data))[:n_samples]

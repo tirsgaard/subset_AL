@@ -8,6 +8,7 @@ from src.AL_agents import GNNLearner
 from src.N2GNN_helpers import PlGNNTestonValModule
 from src.learning_methods import global_AL_subset_model
 from pathlib import Path
+import wandb
 import sys
 sys.path.insert(1, Path("../N2GNN").resolve().as_posix())
 from models.input_encoder import EmbeddingEncoder
@@ -35,7 +36,7 @@ parser.add_argument('--seed', type=int, default=234, help='Random seed for repro
 parser.add_argument('--drop_prob', type=float, default=0.0,
                     help='Probability of zeroing an activation in dropout models.')
 parser.add_argument('--batch_size', type=int, default=128, help='Batch size per GPU.')
-parser.add_argument('--num_workers', type=int, default=0, help='Number of worker.')
+parser.add_argument('--num_workers', type=int, default=32, help='Number of worker.')
 parser.add_argument('--lr', type=float, default=0.001, help='Learning rate.')
 parser.add_argument('--min_lr', type=float, default=1e-6, help='Minimum learning rate.')
 parser.add_argument('--l2_wd', type=float, default=0., help='L2 weight decay.')
@@ -43,7 +44,7 @@ parser.add_argument('--num_epochs', type=int, default=500, help='Number of epoch
 parser.add_argument('--test_eval_interval', type=int, default=10,
                     help='Interval between validation on test dataset.')
 parser.add_argument('--factor', type=float, default=0.5,
-                    help='Factor in the ReduceLROnPlateau learning rate scheduler.')
+                    help='Factor in the ReduceLROnPlateau learninfl rate scheduler.')
 parser.add_argument('--patience', type=int, default=20,
                     help='Patience in the ReduceLROnPlateau learning rate scheduler.')
 parser.add_argument("--offline", action="store_true", help="If true, save the wandb log offline. "
@@ -92,7 +93,8 @@ parser.add_argument('--norm_type', type=str, default="Batch",
 parser.add_argument('--add_rd', action="store_true", help="If true, additionally add resistance distance into model.")
 args = parser.parse_args()
 
-args.num_epochs = 1
+args.exp_name = "ZINC_subset_AL"
+args.num_epochs = 100
 args.hidden_channels = 64
 args.inner_channels = 64
 args.mode = "min"
@@ -119,8 +121,8 @@ model_init = lambda classification: lambda: PlGNNTestonValModule(target_variable
                                            edge_encoder=edge_encoder)
 
 loss_fn = torch.nn.MSELoss()
-init_model_manifold = lambda: GNNLearner(model_init(True), loss=loss_fn, args=class_args, n_epochs=args.num_epochs)
-init_model_global = lambda: GNNLearner(model_init(False), loss=loss_fn, args=args, n_epochs=args.num_epochs)
+init_model_manifold = lambda run_name, run_number: GNNLearner(model_init(True), args=class_args, run_name=run_name, run_number=run_number)
+init_model_global = lambda run_name, run_number: GNNLearner(model_init(False), args=args, run_name=run_name, run_number=run_number)
 
 n_repeats = 10
 data_budget = 1000
@@ -132,15 +134,16 @@ def manifold_experiment(init_model_subset: callable,
                         init_model_global: callable,
                         problem: BaseDataset,
                         data_budget: float,
-                        manifold_budget: float = 0.25) -> tuple[float, float, float, float, np.ndarray, np.ndarray]:
+                        manifold_budget: float = 0.25,
+                        final_test: bool = False) -> tuple[float, float, float, float, np.ndarray, np.ndarray]:
     # Precompute the manifold distances for maximum number of budget samples
-    data_subset, X_index = problem.sample(data_budget)
-    y_manifold = problem.label_manifold(data_subset, X_index)
+    data_subset, index_subset = problem.sample(data_budget)
+    test_data = problem.test_data if final_test else problem.val_data
 
-    # Active learning
+    #### Single round of manifold learning followed by sampling points for training
     manifold_budget = int(manifold_budget*data_budget)
     global_budget = data_budget - manifold_budget
-    model_subset = init_model_subset()
+    model_subset = init_model_subset("single_round_manifold", 0)
     
     # Fit manifold model
     manifold_subset = data_subset[torch.arange(manifold_budget)]
@@ -149,26 +152,29 @@ def manifold_experiment(init_model_subset: callable,
     data_manifold_pred = problem.label_manifold(data_manifold_pred, X_manifold_index)
     
     # Sample points from the manifold
-    model_global = init_model_global()
+    model_global = init_model_global("single_round_global", 0)
     model_global.fit(data_manifold_pred,)
-    pred_errors_subset = model_global.test(problem.test_data)
+    pred_errors_subset = model_global.test(test_data)
+    wandb.finish()
 
-    # Passive learning
-    X_global = data_subset # Set the global data to be the manifold data for variance reduction
-    data_global = problem.label_global(X_global, X_index)
-    model_global = init_model_global()
+    #### Pure passive learning
+    data_global = problem.label_global(data_subset, index_subset)  # Set the global data to be the manifold data for variance reduction
+    model_global = init_model_global("passive_global", 0)
     model_global.fit(data_global)
-    pred_error_uniform = model_global.test(problem.test_data)
+    pred_error_uniform = model_global.test(test_data)
+    wandb.finish()
     
-    # Active learning using subset model
-    model_global = init_model_global()
+    #### Active learning using subset model
+    model_global = init_model_global("AL_subset_global", 0)
     model_global, X_subset_pred_potential = global_AL_subset_model(model_global, model_subset, problem, global_budget)
-    pred_errors_AL_subset = model_global.test(problem.test_data)
+    pred_errors_AL_subset = model_global.test(test_data)
+    wandb.finish()
     
-    # Active learning without the subset model
-    model_global = init_model_global()
+    #### Active learning without the subset model
+    model_global = init_model_global("AL_non-subset_global", 0)
     model_global, X_subset_pred_potential = global_AL_subset_model(model_global, model_subset, problem, global_budget)
-    pred_errors_AL = model_global.test(problem.test_data)
+    pred_errors_AL = model_global.test(test_data)
+    wandb.finish()
     
     return pred_errors_subset, pred_error_uniform, pred_errors_AL_subset, pred_errors_AL, data_manifold_pred, X_subset_pred_potential
 

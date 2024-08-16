@@ -5,6 +5,7 @@ from src.dataset import BaseDataset
 from src.NN_models import SimpleMLP, validate, train_epoch, GNN_validate, GNN_train_epoch
 from copy import deepcopy
 from lightning.pytorch import Trainer
+from lightning.pytorch.loggers import WandbLogger
 from lightning.pytorch.callbacks.progress import TQDMProgressBar
 from lightning.pytorch.callbacks import ModelCheckpoint, LearningRateMonitor, Timer, Callback
 
@@ -211,17 +212,20 @@ class StoreBestModel(Callback):
         
     
 class GNNLearner(NNLearner):
-    def __init__(self, model_init: BaseDataset, loss, args, device: str = 'cpu', lr: float = 0.001, n_epochs: int = 1000, batch_size: int = 32, num_workers: int = 0):
+    def __init__(self, model_init: BaseDataset, args: any, run_name: str, run_number: int):
         #super().__init__(GNNLearner)
         self.model_init = model_init
         self.model = self.model_init()
-        self.loss = loss
         self.args = args
-        self.device = device
-        self.lr = lr
-        self.n_epochs = n_epochs
-        self.batch_size = batch_size
-        self.num_workers = num_workers
+        self.run_name = run_name
+        self.run_number = run_number
+        self.num_workers = args.num_workers
+        
+        self.logger = WandbLogger(name=f'{self.run_name}_run_{str(self.run_number)}',
+                             project=args.exp_name,
+                             save_dir=args.save_dir,
+                             offline=args.offline)
+        self.logger.log_hyperparams(args)
         
         
     def prepare_data(self, dataset) -> any:
@@ -233,7 +237,7 @@ class GNNLearner(NNLearner):
         datamodule = PlPyGDataTestonValModule(train_dataset=train_dataset,
                                               val_dataset=val_dataset,
                                               test_dataset=val_dataset,
-                                              batch_size=self.batch_size,
+                                              batch_size=self.args.batch_size,
                                               num_workers=self.num_workers,
                                               follow_batch=follow_batch,
                                               drop_last=False)
@@ -246,7 +250,8 @@ class GNNLearner(NNLearner):
         best_model_checkpoint = StoreBestModel(monitor="val/metric", mode=self.args.mode)
         trainer = Trainer(accelerator="auto",
                           devices="auto",
-                          max_epochs=self.n_epochs,
+                          max_epochs=self.args.num_epochs,
+                          logger=self.logger,
                           callbacks=[TQDMProgressBar(refresh_rate=20),
                                      best_model_checkpoint,
                                      LearningRateMonitor(logging_interval="epoch"),
@@ -259,7 +264,8 @@ class GNNLearner(NNLearner):
         best_model_checkpoint = StoreBestModel(monitor="val/metric", mode=self.args.mode)
         trainer = Trainer(accelerator="auto",
                           devices="auto",
-                          max_epochs=self.n_epochs,
+                          max_epochs=self.args.num_epochs,
+                          logger=self.logger,
                           callbacks=[TQDMProgressBar(refresh_rate=20),
                                      best_model_checkpoint,
                                      LearningRateMonitor(logging_interval="epoch"),
