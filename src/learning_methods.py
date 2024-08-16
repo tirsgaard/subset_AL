@@ -2,7 +2,7 @@ import numpy as np
 from src.dataset import BaseDataset
 from src.AL_agents import BaseLearner
 
-def global_AL_subset_model(model_global: BaseLearner, 
+def global_AL_subset_model(model_global_init: BaseLearner, 
                            model_subset: BaseLearner, 
                            problem: BaseDataset, 
                            data_budget: int, 
@@ -20,6 +20,7 @@ def global_AL_subset_model(model_global: BaseLearner,
     data_manifold_added = problem.label_global(data_manifold_added, manifold_indexes)
     for n_new_samples in n_stage_samples:
         # Fit model
+        model_global = model_global_init()
         model_global.fit(data_manifold_added)
         # Sample new points
         data_subset_pred_potential, data_index = model_subset.sample(n_samples = int(oversample_multiplier*n_new_samples), global_problem = problem)
@@ -32,6 +33,6 @@ def global_AL_subset_model(model_global: BaseLearner,
         data_manifold_added = problem.label_global(data_manifold_added, manifold_indexes)
         
     # Fit model
-    
+    model_global = model_global_init()
     model_global.fit(data_manifold_added)
     return model_global, data_manifold_added

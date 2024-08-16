@@ -221,7 +221,7 @@ class GNNLearner(NNLearner):
         self.run_number = run_number
         self.num_workers = args.num_workers
         
-        self.logger = WandbLogger(name=f'{self.run_name}_run_{str(self.run_number)}',
+        self.logger = WandbLogger(name=self.run_name,
                              project=args.exp_name,
                              save_dir=args.save_dir,
                              offline=args.offline)
@@ -245,17 +245,14 @@ class GNNLearner(NNLearner):
     
     def test(self, test_dataset) -> float:
         datamodule = self.prepare_data(test_dataset)
-        
-        timer = Timer(duration=dict(weeks=4))
         best_model_checkpoint = StoreBestModel(monitor="val/metric", mode=self.args.mode)
         trainer = Trainer(accelerator="auto",
                           devices="auto",
                           max_epochs=self.args.num_epochs,
                           logger=self.logger,
-                          callbacks=[TQDMProgressBar(refresh_rate=20),
-                                     best_model_checkpoint,
+                          callbacks=[best_model_checkpoint,
                                      LearningRateMonitor(logging_interval="epoch"),
-                                     timer])
+                                     ])
         return trainer.test(self.model, datamodule=datamodule)
         
     def fit(self, dataset) -> None:        
@@ -266,10 +263,9 @@ class GNNLearner(NNLearner):
                           devices="auto",
                           max_epochs=self.args.num_epochs,
                           logger=self.logger,
-                          callbacks=[TQDMProgressBar(refresh_rate=20),
-                                     best_model_checkpoint,
+                          callbacks=[best_model_checkpoint,
                                      LearningRateMonitor(logging_interval="epoch"),
-                                     timer])
+                                     ])
 
         trainer.fit(self.model, datamodule=datamodule)
         

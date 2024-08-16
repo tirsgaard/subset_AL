@@ -94,7 +94,7 @@ parser.add_argument('--add_rd', action="store_true", help="If true, additionally
 args = parser.parse_args()
 
 args.exp_name = "ZINC_subset_AL"
-args.num_epochs = 100
+args.num_epochs = 5
 args.hidden_channels = 64
 args.inner_channels = 64
 args.mode = "min"
@@ -121,21 +121,20 @@ model_init = lambda classification: lambda: PlGNNTestonValModule(target_variable
                                            edge_encoder=edge_encoder)
 
 loss_fn = torch.nn.MSELoss()
-init_model_manifold = lambda run_name, run_number: GNNLearner(model_init(True), args=class_args, run_name=run_name, run_number=run_number)
-init_model_global = lambda run_name, run_number: GNNLearner(model_init(False), args=args, run_name=run_name, run_number=run_number)
+init_model_manifold = lambda run_name: GNNLearner(model_init(True), args=class_args, run_name=run_name)
+init_model_global = lambda run_name: GNNLearner(model_init(False), args=args, run_name=run_name)
 
-n_repeats = 10
+n_repeats = 2
 data_budget = 1000
 
-def calculate_accuracy(y_hat, y):
-    return np.mean(y_hat.argmax(-1) == y.argmax(-1))
 
 def manifold_experiment(init_model_subset: callable,
                         init_model_global: callable,
                         problem: BaseDataset,
                         data_budget: float,
                         manifold_budget: float = 0.25,
-                        final_test: bool = False) -> tuple[float, float, float, float, np.ndarray, np.ndarray]:
+                        final_test: bool = False,
+                        run_id: int = 0) -> tuple[float, float, float, float, np.ndarray, np.ndarray]:
     # Precompute the manifold distances for maximum number of budget samples
     data_subset, index_subset = problem.sample(data_budget)
     test_data = problem.test_data if final_test else problem.val_data
@@ -143,36 +142,37 @@ def manifold_experiment(init_model_subset: callable,
     #### Single round of manifold learning followed by sampling points for training
     manifold_budget = int(manifold_budget*data_budget)
     global_budget = data_budget - manifold_budget
-    model_subset = init_model_subset("single_round_manifold", 0)
+    model_subset = init_model_subset(f"single_round_manifold_run_{run_id}")
     
     # Fit manifold model
     manifold_subset = data_subset[torch.arange(manifold_budget)]
     model_subset.fit(manifold_subset)
     data_manifold_pred, X_manifold_index = model_subset.sample(global_budget, problem)
     data_manifold_pred = problem.label_manifold(data_manifold_pred, X_manifold_index)
+    wandb.finish()
     
     # Sample points from the manifold
-    model_global = init_model_global("single_round_global", 0)
+    model_global = init_model_global(f"single_round_global_run_{run_id}")
     model_global.fit(data_manifold_pred,)
     pred_errors_subset = model_global.test(test_data)
     wandb.finish()
 
     #### Pure passive learning
     data_global = problem.label_global(data_subset, index_subset)  # Set the global data to be the manifold data for variance reduction
-    model_global = init_model_global("passive_global", 0)
+    model_global = init_model_global(f"passive_global_run_{run_id}")
     model_global.fit(data_global)
     pred_error_uniform = model_global.test(test_data)
     wandb.finish()
     
     #### Active learning using subset model
-    model_global = init_model_global("AL_subset_global", 0)
-    model_global, X_subset_pred_potential = global_AL_subset_model(model_global, model_subset, problem, global_budget)
+    model_global_init = lambda loop_id: init_model_global(f"AL_subset_global_run_{run_id}_loop_{loop_id}")
+    model_global, X_subset_pred_potential = global_AL_subset_model(model_global_init, model_subset, problem, global_budget)
     pred_errors_AL_subset = model_global.test(test_data)
     wandb.finish()
     
     #### Active learning without the subset model
-    model_global = init_model_global("AL_non-subset_global", 0)
-    model_global, X_subset_pred_potential = global_AL_subset_model(model_global, model_subset, problem, global_budget)
+    model_global_init = lambda loop_id: init_model_global(f"AL_non-subset_global_run_{run_id}_loop_{loop_id}")
+    model_global, X_subset_pred_potential = global_AL_subset_model(model_global_init, model_subset, problem, global_budget)
     pred_errors_AL = model_global.test(test_data)
     wandb.finish()
     
@@ -181,11 +181,12 @@ def manifold_experiment(init_model_subset: callable,
 run_experiment = True
 if run_experiment:
     results = []
-    for _ in tqdm(range(n_repeats)):
+    for i in tqdm(range(n_repeats)):
         result = manifold_experiment(init_model_manifold, 
                                         init_model_global, 
                                         problem, 
-                                        data_budget)
+                                        data_budget,
+                                        run_id=i)
         results.append(result)
         
     pred_errors_subset = np.array([res[0] for res in results])
@@ -221,6 +222,21 @@ subset_mean, subset_bound = generate_uncertainty_estimate(pred_errors_subset)
 uniform_mean, uniform_bound = generate_uncertainty_estimate(pred_error_uniform)
 AL_subset_mean, AL_subset_bound = generate_uncertainty_estimate(pred_errors_AL_subset)
 AL_mean, AL_bound = generate_uncertainty_estimate(pred_errors_AL)
+
+
+# Print errors and uncertainty to 2 decimal places
+print(f"Subset accuracy: {subset_mean:.3f} +- {subset_bound:.3f}")
+print(f"Uniform accuracy: {uniform_mean:.3f} +- {uniform_bound:.3f}")
+print(f"AL subset accuracy: {AL_subset_mean:.3f} +- {AL_subset_bound:.3f}")
+print(f"AL accuracy: {AL_mean:.3f} +- {AL_bound:.3f}")
+
+
+print("Switching to PL normalized performance")
+
+subset_mean, subset_bound = generate_uncertainty_estimate(pred_errors_subset - pred_error_uniform)
+uniform_mean, uniform_bound = generate_uncertainty_estimate(pred_error_uniform - pred_error_uniform)
+AL_subset_mean, AL_subset_bound = generate_uncertainty_estimate(pred_errors_AL_subset - pred_error_uniform)
+AL_mean, AL_bound = generate_uncertainty_estimate(pred_errors_AL - pred_error_uniform)
 
 
 # Print errors and uncertainty to 2 decimal places
