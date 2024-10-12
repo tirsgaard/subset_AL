@@ -119,7 +119,7 @@ args.step_size = 50
 args.gamma = 0.1
 args.lr_scheduler = "StepLR"
 args.l2_wd = 0.005
-n_repeats = 20 if not args.debug else 2
+n_repeats = 10 if not args.debug else 2
 
 manifold_budget = args.manifold_fraction
 args.group = "Perfect_manifold_weight_decay"#str(int(time()))
@@ -184,33 +184,22 @@ def manifold_experiment(init_model_subset: callable,
     data_subset, index_subset = problem.sample(data_budget, device=device)
     test_data = problem.test_data if final_test else problem.val_data
     
-    run_ensemble = True
-    run_upper_bound_subset = True
-    run_manifold_model = True
-    run_perfect_model = True
-    run_passive_learning = False
-    run_mixed_model = False
-    run_AL = False
-    run_AL_no_subset = False
-    
-    results = {}
     ### Upper bound subset model
-    if run_upper_bound_subset:
-        model_subset, data_manifold_added = upper_bound_subset_model(init_model_subset, 
-                            problem, 
-                            data_budget,
-                            start_budget = 50,
-                            batch_sizes = 10,
-                            runs = 2, 
-                            device=gpu_id,
-                            run_ensemble=run_ensemble)
-        
-        global_budget = data_budget - len(data_manifold_added)
-        data_manifold_pred, X_manifold_index = model_subset.sample(global_budget, problem, ensure_subset=False)
-        model_subset.fit(data_manifold_added)
-        upper_errors_subset = model_subset.test(test_data)
-        results["upper_errors_subset"] = upper_errors_subset[0]['test/metric']
-        print(f"Upper model error: {upper_errors_subset[0]['test/metric']:.3f}, Budget used for manifold: {len(data_manifold_added)}")
+    """
+    model_subset, data_manifold_added = upper_bound_subset_model(init_model_subset, 
+                           problem, 
+                           data_budget,
+                           start_budget = 50,
+                           batch_sizes = 10,
+                           runs = 30, 
+                           device=gpu_id)
+    
+    global_budget = data_budget - len(data_manifold_added)
+    data_manifold_pred, X_manifold_index = model_subset.sample(global_budget, problem, ensure_subset=False)
+    model_subset.fit(data_manifold_added)
+    upper_errors_subset = model_subset.test(test_data)
+    print(f"Upper model error: {upper_errors_subset[0]['test/metric']:.3f}, Budget used for manifold: {len(data_manifold_added)}")
+    """
 
     #### Single round of manifold learning followed by sampling points for training
     manifold_budget = int(manifold_budget*data_budget)
@@ -218,95 +207,84 @@ def manifold_experiment(init_model_subset: callable,
     model_subset = init_model_subset(f"single_round_manifold_run_{run_id}", gpu_id)
     
     # Fit manifold model
-    if run_manifold_model:
-        manifold_subset = data_subset[torch.arange(manifold_budget)]
-        if len(manifold_subset) > 0:
-            model_subset.fit(manifold_subset)
-        data_manifold_pred, X_manifold_index = model_subset.sample(global_budget, 
-                                                                problem, 
-                                                                ensure_subset=False,
-                                                                black_listed_indexes=index_subset.tolist())
-        data_manifold_pred = problem.label_manifold(data_manifold_pred, X_manifold_index)
-        manifold_accuracy = torch.mean(torch.tensor([value.in_subset for value in list(data_manifold_pred)])).detach().item()
-        results["manifold_accuracy"] = manifold_accuracy
-        wandb.finish()
+    manifold_subset = data_subset[torch.arange(manifold_budget)]
+    if len(manifold_subset) > 0:
+        model_subset.fit(manifold_subset)
+    data_manifold_pred, X_manifold_index = model_subset.sample(global_budget, 
+                                                               problem, 
+                                                               ensure_subset=False,
+                                                               black_listed_indexes=index_subset.tolist())
+    data_manifold_pred = problem.label_manifold(data_manifold_pred, X_manifold_index)
+    manifold_accuracy = torch.mean(torch.tensor([value.in_subset for value in list(data_manifold_pred)])).detach().item()
+    wandb.finish()
     
-        # Sample points from the manifold
-        model_global = init_model_global(f"single_round_global_run_{run_id}", gpu_id)
-        model_global_parameters = deepcopy(model_global.model.state_dict())
-        if len(data_manifold_pred) > 0:
-            model_global.fit(data_manifold_pred,)
-        pred_errors_subset = model_global.test(test_data)
-        results["pred_errors_subset"] = pred_errors_subset[0]['test/metric']
-        print(f"Subset error: {pred_errors_subset[0]['test/metric']:.3f}")
-        wandb.finish()
-        
-    if run_perfect_model:
-        # Fit manifold model
-        data_manifold_pred, X_manifold_index = model_subset.sample(global_budget, problem, ensure_subset=True, black_listed_indexes=index_subset.tolist(), subset_chance=manifold_accuracy)
-        data_manifold_pred = problem.label_manifold(data_manifold_pred, X_manifold_index)
-        wandb.finish()
-        
-        # Sample points from the manifold
-        model_global = init_model_global(f"single_round_global_run_{run_id}", gpu_id)
-        model_global.model.load_state_dict(model_global_parameters)  # Reset the global model to the initial state to ensure fair comparison
+    # Sample points from the manifold
+    model_global = init_model_global(f"single_round_global_run_{run_id}", gpu_id)
+    model_global_parameters = deepcopy(model_global.model.state_dict())
+    if len(data_manifold_pred) > 0:
         model_global.fit(data_manifold_pred,)
-        pred_errors_perfect = model_global.test(test_data)
-        results["pred_errors_perfect"] = pred_errors_perfect[0]['test/metric']
-        print(f"Subset Perfect error: {pred_errors_perfect[0]['test/metric']:.3f}")
-        wandb.finish()
+    pred_errors_subset = model_global.test(test_data)
+    print(f"Subset error: {pred_errors_subset[0]['test/metric']:.3f}")
+    wandb.finish()
     
-    if run_passive_learning:
-        #### Pure passive learning
-        seed_everything(run_id, workers=True)
-        data_global = problem.label_global(data_subset, index_subset)  # Set the global data to be the manifold data for variance reduction
-        model_global = init_model_global(f"passive_global_run_{run_id}", gpu_id)
-        model_global.to(device)
-        model_global.model.load_state_dict(model_global_parameters)  # Reset the global model to the initial state to ensure fair comparison
-        model_global.fit(data_global)
-        pred_error_uniform = model_global.test(test_data)
-        results["pred_error_uniform"] = pred_error_uniform[0]['test/metric']
-        print(f"Uniform accuracy: {pred_error_uniform[0]['test/metric']:.3f}")
-        wandb.finish()
+    # Fit manifold model
+    data_manifold_pred, X_manifold_index = model_subset.sample(global_budget, problem, ensure_subset=True, black_listed_indexes=index_subset.tolist())
+    data_manifold_pred = problem.label_manifold(data_manifold_pred, X_manifold_index)
+    wandb.finish()
     
-    if run_mixed_model:
-        ### Mix data from the manifold and the global data
-        seed_everything(run_id, workers=True)
-        model_global = init_model_global(f"mixed_global_run_{run_id}", gpu_id)
-        model_global.to(device)
-        model_global.model.load_state_dict(model_global_parameters)  # Reset the global model to the initial state to ensure fair comparison
-        data_ratio = 0.2
-        data_mixed_idx = np.concatenate([X_manifold_index[:int(data_budget*(1-data_ratio))], index_subset[:int(data_budget*data_ratio)]])
-        np.random.shuffle(data_mixed_idx)
-        data_mixed = problem.train_data[data_mixed_idx]
-        model_global.fit(data_mixed)
-        pred_error_mixed = model_global.test(test_data)
-        results["pred_error_mixed"] = pred_error_mixed[0]['test/metric']
-        print(f"Mixed accuracy: {pred_error_mixed[0]['test/metric']:.3f}")
-        wandb.finish()
+    # Sample points from the manifold
+    model_global = init_model_global(f"single_round_global_run_{run_id}", gpu_id)
+    model_global.model.load_state_dict(model_global_parameters)  # Reset the global model to the initial state to ensure fair comparison
+    model_global.fit(data_manifold_pred,)
+    pred_errors_perfect = model_global.test(test_data)
+    print(f"Subset Perfect error: {pred_errors_subset[0]['test/metric']:.3f}")
+    wandb.finish()
+    
+    """
+    #### Pure passive learning
+    seed_everything(run_id, workers=True)
+    data_global = problem.label_global(data_subset, index_subset)  # Set the global data to be the manifold data for variance reduction
+    model_global = init_model_global(f"passive_global_run_{run_id}", gpu_id)
+    model_global.to(device)
+    model_global.model.load_state_dict(model_global_parameters)  # Reset the global model to the initial state to ensure fair comparison
+    model_global.fit(data_global)
+    pred_error_uniform = model_global.test(test_data)
+    print(f"Uniform accuracy: {pred_error_uniform[0]['test/metric']:.3f}")
+    wandb.finish()
+    
+    ### Mix data from the manifold and the global data
+    seed_everything(run_id, workers=True)
+    model_global = init_model_global(f"mixed_global_run_{run_id}", gpu_id)
+    model_global.to(device)
+    model_global.model.load_state_dict(model_global_parameters)  # Reset the global model to the initial state to ensure fair comparison
+    data_ratio = 0.2
+    data_mixed_idx = np.concatenate([X_manifold_index[:int(data_budget*(1-data_ratio))], index_subset[:int(data_budget*data_ratio)]])
+    np.random.shuffle(data_mixed_idx)
+    data_mixed = problem.train_data[data_mixed_idx]
+    model_global.fit(data_mixed)
+    pred_error_mixed = model_global.test(test_data)
+    print(f"Mixed accuracy: {pred_error_mixed[0]['test/metric']:.3f}")
+    wandb.finish()
     
 
-    if run_AL:
-        #### Active learning using subset model
-        seed_everything(run_id, workers=True)
-        model_global_init = lambda loop_id: init_model_global(f"AL_subset_global_run_{run_id}_loop_{loop_id}", gpu_id)
-        model_global, X_subset_pred_potential = global_AL_subset_model(model_global_init, model_subset, problem, global_budget, n_iterations=5, model_global_state=model_global_parameters)
-        pred_errors_AL_subset = model_global.test(test_data)
-        results["pred_errors_AL_subset"] = pred_errors_AL_subset[0]['test/metric']
-        print(f"AL subset accuracy: {pred_errors_AL_subset[0]['test/metric']:.3f}")
-        wandb.finish()
+    #### Active learning using subset model
+    seed_everything(run_id, workers=True)
+    model_global_init = lambda loop_id: init_model_global(f"AL_subset_global_run_{run_id}_loop_{loop_id}", gpu_id)
+    model_global, X_subset_pred_potential = global_AL_subset_model(model_global_init, model_subset, problem, global_budget, n_iterations=5, model_global_state=model_global_parameters)
+    pred_errors_AL_subset = model_global.test(test_data)
+    print(f"AL subset accuracy: {pred_errors_AL_subset[0]['test/metric']:.3f}")
+    wandb.finish()
     
-    if run_AL_no_subset:
-        #### Active learning without the subset model
-        seed_everything(run_id, workers=True)
-        model_global_init = lambda loop_id: init_model_global(f"AL_non-subset_global_run_{run_id}_loop_{loop_id}", gpu_id)
-        model_global, X_subset_pred_potential = global_AL_subset_model(model_global_init, RandomLearner(problem), problem, global_budget, n_iterations=5, model_global_state=model_global_parameters)
-        pred_errors_AL = model_global.test(test_data)
-        results["pred_errors_AL"] = pred_errors_AL[0]['test/metric']
-        print(f"AL accuracy: {pred_errors_AL[0]['test/metric']:.3f}")
-        wandb.finish()
+    #### Active learning without the subset model
+    seed_everything(run_id, workers=True)
+    model_global_init = lambda loop_id: init_model_global(f"AL_non-subset_global_run_{run_id}_loop_{loop_id}", gpu_id)
+    model_global, X_subset_pred_potential = global_AL_subset_model(model_global_init, RandomLearner(problem), problem, global_budget, n_iterations=5, model_global_state=model_global_parameters)
+    pred_errors_AL = model_global.test(test_data)
+    print(f"AL accuracy: {pred_errors_AL[0]['test/metric']:.3f}")
+    wandb.finish()
+    """
     
-    return results
+    return pred_errors_subset, pred_errors_perfect, manifold_accuracy#, upper_errors_subset, #pred_error_uniform, pred_errors_AL_subset, pred_errors_AL#, data_manifold_pred, X_subset_pred_potential
 
 if __name__ == "__main__":
     save_path = Path(args.save_dir) / Path('manifold_data' + str(start_time) + '.pkl')
@@ -330,11 +308,11 @@ if __name__ == "__main__":
                                                     run_id=i)
                                                     for i in range(n_repeats))
         output = {"results": results,
-                  "args": args,
-                  "time": time() - start_time,
-                  "start_time": start_time,
-                  "end_time": time(),
-                  }
+            "args": args,
+            "time": time() - start_time,
+            "start_time": start_time,
+            "end_time": time(),
+            }
         print("Saving results.......")
         with open(save_path, 'wb') as f:
             pickle.dump(results, f)
@@ -344,6 +322,13 @@ if __name__ == "__main__":
             output = pickle.load(f)
         results = output["results"]
         
+    pred_errors_subset = np.array([res[0][0]["test/metric"] for res in results])
+    pred_error_uniform = np.array([res[1][0]["test/metric"] for res in results])
+    pred_errors_upper = np.array([res[2] for res in results])
+    #pred_errors_AL = np.array([res[3][0]["test/metric"] for res in results])
+    #AL_X_manifold = [res[4] for res in results]
+    #AL_global_X_manifold = [res[5] for res in results]
+        
     def generate_uncertainty_estimate(data_sample, significance_level=0.05):
         mean = data_sample.mean(0)
         std = data_sample.std(0)
@@ -351,8 +336,32 @@ if __name__ == "__main__":
         q_val = norm().ppf(1 - significance_level / 2)
         lines = q_val*std/n_root
         return mean, lines[0]
-    
-    for model in results[0]:
-        results_model = np.array([results[i][model] for i in range(len(results))])
-        mean, bound = generate_uncertainty_estimate(results_model)
-        print(f"{model}: {mean:.3f} +- {bound:.3f}")
+
+    subset_mean, subset_bound = generate_uncertainty_estimate(pred_errors_subset)
+    uniform_mean, uniform_bound = generate_uncertainty_estimate(pred_error_uniform)
+    subset_upper_mean, subset_upper_bound = generate_uncertainty_estimate(pred_errors_upper)
+    #AL_subset_mean, AL_subset_bound = generate_uncertainty_estimate(pred_errors_AL_subset)
+    #AL_mean, AL_bound = generate_uncertainty_estimate(pred_errors_AL)
+
+
+    # Print errors and uncertainty to 2 decimal places
+    print(f"Subset error: {subset_mean:.3f} +- {subset_bound:.3f}")
+    print(f"Uniform error: {uniform_mean:.3f} +- {uniform_bound:.3f}")
+    print(f"Subset upper error: {subset_upper_mean:.3f} +- {subset_upper_bound:.3f}")
+    #print(f"AL subset error: {AL_subset_mean:.3f} +- {AL_subset_bound:.3f}")
+    #print(f"AL error: {AL_mean:.3f} +- {AL_bound:.3f}")
+
+
+    print("Switching to PL normalized performance")
+
+    subset_mean, subset_bound = generate_uncertainty_estimate(pred_errors_subset - pred_error_uniform)
+    uniform_mean, uniform_bound = generate_uncertainty_estimate(pred_error_uniform - pred_error_uniform)
+    #AL_subset_mean, AL_subset_bound = generate_uncertainty_estimate(pred_errors_AL_subset - pred_error_uniform)
+    #AL_mean, AL_bound = generate_uncertainty_estimate(pred_errors_AL - pred_error_uniform)
+
+
+    # Print errors and uncertainty to 2 decimal places
+    print(f"Subset error: {subset_mean:.3f} +- {subset_bound:.3f}")
+    print(f"Uniform error: {uniform_mean:.3f} +- {uniform_bound:.3f}")
+    #print(f"AL subset error: {AL_subset_mean:.3f} +- {AL_subset_bound:.3f}")
+    #print(f"AL error: {AL_mean:.3f} +- {AL_bound:.3f}")

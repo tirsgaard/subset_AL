@@ -107,12 +107,15 @@ class PlGNNModule(LightningModule):
             lr=self.args.lr,
             weight_decay=float(self.args.l2_wd),
         )
+        if self.args.lr_scheduler == "StepLR":
+            scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=self.args.step_size, gamma=self.args.gamma)
+        else:
+            scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+                    optimizer, mode=self.args.mode, factor=self.args.factor, patience=self.args.lr_patience, min_lr=self.args.min_lr)
         return {
             "optimizer": optimizer,
             "lr_scheduler": {
-                "scheduler": torch.optim.lr_scheduler.ReduceLROnPlateau(
-                    optimizer, mode=self.args.mode, factor=self.args.factor, patience=self.args.patience, min_lr=self.args.min_lr
-                ),
+                "scheduler":  scheduler,
                 "monitor": "val/metric",
                 "frequency": 1,
                 "interval": "epoch",
@@ -219,9 +222,11 @@ class PlGNNTestonValModule(PlGNNModule):
                  args: ArgumentParser,
                  init_encoder: Optional[nn.Module] = None,
                  edge_encoder: Optional[nn.Module] = None,
+                 is_classification: bool = False,
                  ):
         super(PlGNNTestonValModule, self).__init__(target_variable, loss_criterion, evaluator, args, init_encoder, edge_encoder)
         self.target_variable = target_variable
+        self.is_classification = is_classification
         self.test_eval_still = self.args.test_eval_interval
 
     def validation_step(self,
@@ -238,28 +243,56 @@ class PlGNNTestonValModule(PlGNNModule):
                      prog_bar=False,
                      batch_size=self.args.batch_size,
                      add_dataloader_idx=False)
+            if self.is_classification:
+                accuracy = ((out > 0.5) == y).float().mean()
+                self.log("val/accuracy",
+                         accuracy,
+                         prog_bar=False,
+                         batch_size=self.args.batch_size,
+                         add_dataloader_idx=False,
+                         on_step=False,)
             self.val_evaluator.update(out, y)
         else:
             if self.test_eval_still != 0:
                 return {'loader_idx': dataloader_idx}
             # only do validation on test set when reaching the predefined epoch.
-            else:
-                y = getattr(batch, self.target_variable)
-                out = self.forward(batch)
-                loss = self.loss_criterion(out, y)
-                self.log("test/loss",
-                         loss,
+            y = getattr(batch, self.target_variable)
+            out = self.forward(batch)
+            loss = self.loss_criterion(out, y)
+            self.log("test/loss",
+                        loss,
+                        prog_bar=False,
+                        batch_size=self.args.batch_size,
+                        add_dataloader_idx=False)
+            if self.is_classification:
+                accuracy = ((out > 0.5) == y).float().mean()
+                self.log("test/accuracy",
+                         accuracy,
                          prog_bar=False,
                          batch_size=self.args.batch_size,
-                         add_dataloader_idx=False)
-                self.test_evaluator.update(out, y)
+                         add_dataloader_idx=False,
+                         on_step=False,)
+            self.test_evaluator.update(out, y)
+
         return {'loss': loss, 'preds': out, 'target': y, 'loader_idx': dataloader_idx}
 
     def on_validation_epoch_end(self):
+        val_metric = self.val_evaluator.compute()
         self.log("val/metric",
-                 self.val_evaluator.compute(),
+                 val_metric,
                  prog_bar=True,
                  add_dataloader_idx=False)
+        
+                # Log the minimum validation error over the entire training process
+        if self.current_epoch == 0:
+            self.min_val_loss = val_metric
+        else:
+            self.min_val_loss = min(self.min_val_loss, val_metric)
+        self.log("val/min_loss",
+                 self.min_val_loss,
+                 prog_bar=True,
+                 add_dataloader_idx=False)
+            
         self.val_evaluator.reset()
         if self.test_eval_still == 0:
             self.log("test/metric",
@@ -270,6 +303,8 @@ class PlGNNTestonValModule(PlGNNModule):
             self.test_eval_still = self.args.test_eval_interval
         else:
             self.test_eval_still = self.test_eval_still - 1
+            
+
 
     def set_test_eval_still(self):
         # set test validation interval to zero to performance test dataset validation.

@@ -1,8 +1,9 @@
 import torch
-#import torchvision
+import torchvision
 import torch.nn.functional as F
 from time import time
 import torch.nn as nn
+from src.dataset import MNISTDataset
 
 class linear_batch_norm_relu(nn.Module):
     def __init__(self, in_features, out_features, bias=True):
@@ -168,6 +169,21 @@ class CNN(nn.Module):
             x = layer(x)
         return x
     
+class ResNetModel(nn.Module):
+    def __init__(self, in_channels, n_classes):
+        super().__init__()
+        self.n_classes = n_classes
+        self.model = torchvision.models.resnet18(pretrained=False)
+        self.model.conv1 = nn.Conv2d(in_channels, 64, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+        self.model.fc = nn.Linear(512, n_classes)
+        
+    def forward(self, x):
+        if isinstance(x, MNISTDataset):
+            x = x.x
+        y_hat = self.model(x)
+        if self.n_classes == 1:
+            return torch.sigmoid(y_hat.squeeze(-1))
+        return y_hat
     
 class linear_relu_parallel(nn.Module):
     def __init__(self, in_features: int, out_features: int, num_parallel: int, bias: bool = True):
